@@ -72,6 +72,13 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
 
     data['train'].set_epoch(epoch)  # set epoch in process safe manner via sampler or shared_epoch
     dataloader = data['train'].dataloader
+
+    '''
+    teacher_dataloader = data["teacher"]
+    teacher_dataloader_iter = None
+    teacher_sampler = data["teacher_sampler"]
+    '''
+    
     num_batches_per_epoch = dataloader.num_batches // args.accum_freq
     sample_digits = math.ceil(math.log(dataloader.num_samples + 1, 10))
 
@@ -89,10 +96,20 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
         if not args.skip_scheduler:
             scheduler(step)
 
-        images, texts = batch
+        images, texts, img_ids = batch
+        #teacher_sampler.update(img_ids)
+
         images = images.to(device=device, dtype=input_dtype, non_blocking=True)
         texts = texts.to(device=device, non_blocking=True)
-
+        
+        # grab corresponding teacher_logits from HDF5Loader
+        '''
+        teacher_logits = next(iter(teacher_dataloader))
+        teacher_images, teacher_texts = teacher_logits
+        #print(teacher_images.shape, teacher_texts.shape)
+        teacher_logits = teacher_logits.to(device=device, non_blocking=True)
+        '''
+        
         data_time_m.update(time.time() - end)
         optimizer.zero_grad()
 

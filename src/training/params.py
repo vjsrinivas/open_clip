@@ -452,6 +452,24 @@ def parse_args(args):
         action="store_true",
         help='Use SigLip (sigmoid) loss.'
     )
+    parser.add_argument(
+        "--hdf5-path",
+        required=True,
+        type=str,
+        help='Path to where all HDF5 files related to teacher-based distilation is stored.'
+    )
+    parser.add_argument(
+        "--hdf5-meta-path",
+        required=True,
+        type=str,
+        help='Path to where the meta file for the HDF5 files is stored.'
+    )
+    parser.add_argument(
+        "--syn-text-file",
+        required=True,
+        type=str,
+        help="Path to text file that contains synthetic text data"
+    )
 
     args = parser.parse_args(args)
 

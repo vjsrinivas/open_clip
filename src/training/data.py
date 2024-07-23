@@ -15,10 +15,14 @@ import torch
 import torchvision.datasets as datasets
 import webdataset as wds
 from PIL import Image
-from torch.utils.data import Dataset, DataLoader, SubsetRandomSampler, IterableDataset, get_worker_info
+from torch.utils.data import Dataset, DataLoader, SubsetRandomSampler, IterableDataset, get_worker_info, Sampler
 from torch.utils.data.distributed import DistributedSampler
 from webdataset.filters import _shuffle
 from webdataset.tariterators import base_plus_ext, url_opener, tar_file_expander, valid_sample
+
+import h5py
+import numpy as np
+from hashlib import md5
 
 try:
     import horovod.torch as hvd
@@ -238,6 +242,101 @@ _SHARD_SHUFFLE_INITIAL = 500
 _SAMPLE_SHUFFLE_SIZE = 5000
 _SAMPLE_SHUFFLE_INITIAL = 1000
 
+class HDF5Dataset(Dataset):
+    def __init__(self, hdf5_path:str, hdf5_meta_file) -> None:
+        super().__init__()
+        self.hdf5_path = hdf5_path
+        self.hdf5_meta_file = hdf5_meta_file
+        self.h5_dataset_names = [_data for _data in os.listdir(self.hdf5_path) if ".hdf5" in _data]
+        self.h5_dataset_names.sort()
+        self.datasets = None
+        
+        with open(hdf5_meta_file, "r") as mapping_file:
+            self.mapping = [ _line.split(",") for _line in list(map(str.strip, mapping_file.readlines()))]
+            self.mapping = [ [_line[0],int(_line[1]),_line[2]] if _line[2] != "-1" else [_line[0],int(_line[1]), int(_line[2])] for _line in self.mapping ]
+
+    def __getitem__(self, index) -> torch.Tensor:
+        if self.datasets is None:
+            # load all files:
+            self.datasets = [h5py.File( os.path.join(self.hdf5_path, _file), 'r') for _file in self.h5_dataset_names]
+        hash_lookup, h5_id, alt_status = self.mapping[index]
+        dataset = self.datasets[h5_id]
+        print(">>>>>>>>>>", hash_lookup, h5_id, alt_status)
+
+        if alt_status == -1:
+            data_couple = dataset["images"][hash_lookup]
+            img_tensor, text_tensor = data_couple["img"], data_couple["text"]
+        else:
+            img_tensor = dataset["images"][hash_lookup]["img"]
+            text_tensor = dataset["alt"][alt_status]["text"]
+            
+        #print(img_tensor.shape, text_tensor.shape)
+        #print(hash_lookup, h5_id, alt_status, alt_status_proper)
+        #input()
+        return img_tensor[()], text_tensor[()]
+
+    def __len__(self):
+        return len(self.mapping)
+    
+class HDF5Shuffler(Sampler):
+    def __init__(self, hdf5_meta_file:str):
+        self.hdf5_meta_file = hdf5_meta_file
+        self.mapping_to_index = {}
+        with open(hdf5_meta_file, "r") as mapping_file:
+            self.mapping = [ _line.split(",") for _line in list(map(str.strip, mapping_file.readlines()))]
+            self.mapping = [ [_line[0],int(_line[1]),_line[2]] if _line[2] != "-1" else [_line[0],int(_line[1]), int(_line[2])] for _line in self.mapping ]
+        self.mapping_dict = {}
+        for i, _map in enumerate(self.mapping):
+            _key = _map[0].split("_")[0] # get the image ID only
+            if _key in self.mapping_dict:
+                self.mapping_dict[_key].append(i)
+            else:
+                self.mapping_dict[_key] = [i]
+
+        self.indices = None
+
+    def __iter__(self):
+        assert self.indices is not None, "self.indices cannot be None. Make sure you use update()"
+        return iter( self.__calculate_indices__() )
+    
+    def __calculate_indices__(self):
+        indices = [ random.choice(self.mapping_dict[_idx]) for _idx in self.indices ]
+        print("#############", indices)
+        return indices
+
+    def __len__(self):
+        return len(self.indices)
+    
+    def update(self, indices):
+        self.indices = indices
+
+    
+class CaptionManager:
+    def __init__(self, alt_text_file, replace_probability=0.5):
+        self.replace_probability = replace_probability
+        self.alt_text_file = alt_text_file
+        with open(self.alt_text_file, "r") as f:
+            data = list(map(str.strip, f.readlines())) 
+            self.data_len = len(data)       
+            data = [_data.split(",") for _data in data]
+            self.text_mapping = {}
+
+            for _id, _txt in data:
+                if _id in self.text_mapping:
+                    self.text_mapping[_id].append(_txt)
+                else:
+                    self.text_mapping[_id] = [_txt]
+
+    def __call__(self, sample:dict):
+        sample["json"] = sample["json"]["key"]
+        if np.random.random() > self.replace_probability:
+            img_index = sample["json"]
+            _caption = random.choice(self.text_mapping[img_index])
+            sample["text"] = _caption
+        return sample
+
+    def __len__(self):
+        return self.data_len
 
 class detshuffle2(wds.PipelineStage):
     def __init__(
@@ -270,7 +369,6 @@ class detshuffle2(wds.PipelineStage):
         rng.seed(seed)
         return _shuffle(src, self.bufsize, self.initial, rng)
 
-
 class ResampledShards2(IterableDataset):
     """An iterable dataset yielding a list of urls."""
 
@@ -281,7 +379,7 @@ class ResampledShards2(IterableDataset):
         nshards=sys.maxsize,
         worker_seed=None,
         deterministic=False,
-        epoch=-1,
+        epoch=-1
     ):
         """Sample shards from the shard list with replacement.
 
@@ -291,10 +389,12 @@ class ResampledShards2(IterableDataset):
         urls, weights = expand_urls(urls, weights)
         self.urls = urls
         self.weights = weights
+
         if self.weights is not None:
             assert len(self.urls) == len(self.weights),\
                 f"Number of urls {len(self.urls)} and weights {len(self.weights)} should match."
         assert isinstance(self.urls[0], str)
+
         self.nshards = nshards
         self.rng = random.Random()
         self.worker_seed = worker_seed
@@ -324,6 +424,9 @@ class ResampledShards2(IterableDataset):
             else:
                 yield dict(url=self.rng.choices(self.urls, weights=self.weights, k=1)[0])
 
+def reformat_to_include_json(sample):
+    sample["json"] = sample["json"]["key"]
+    return sample
 
 def get_wds_dataset(args, preprocess_img, is_train, epoch=0, floor=False, tokenizer=None):
     input_shards = args.train_data if is_train else args.val_data
@@ -386,12 +489,16 @@ def get_wds_dataset(args, preprocess_img, is_train, epoch=0, floor=False, tokeni
             # at this point, we have an iterator over the shards assigned to each worker
             wds.tarfile_to_samples(handler=log_and_continue),
         ])
+
+    syn_caption_swap = CaptionManager(args.syn_text_file)
     pipeline.extend([
         wds.select(filter_no_caption_or_no_image),
         wds.decode("pilrgb", handler=log_and_continue),
-        wds.rename(image="jpg;png;jpeg;webp", text="txt"),
+        wds.rename(image="jpg;png;jpeg;webp", text="txt", json="json"),
+        wds.map(syn_caption_swap),
+        #wds.map_dict(image=preprocess_img, text=lambda text: tokenizer(text)[0]),
         wds.map_dict(image=preprocess_img, text=lambda text: tokenizer(text)[0]),
-        wds.to_tuple("image", "text"),
+        wds.to_tuple("image", "text", "json"),
         wds.batched(args.batch_size, partial=not is_train)
     ])
 
@@ -550,6 +657,8 @@ def get_data(args, preprocess_fns, epoch=0, tokenizer=None):
     if args.train_data or args.dataset_type == "synthetic":
         data["train"] = get_dataset_fn(args.train_data, args.dataset_type)(
             args, preprocess_train, is_train=True, epoch=epoch, tokenizer=tokenizer)
+        #data["teacher_sampler"] = HDF5Shuffler(args.hdf5_meta_path)
+        #data["teacher"] = DataLoader( HDF5Dataset(args.hdf5_path, args.hdf5_meta_path), batch_size=args.batch_size, sampler=data["teacher_sampler"], num_workers=args.workers )
 
     if args.val_data:
         data["val"] = get_dataset_fn(args.val_data, args.dataset_type)(

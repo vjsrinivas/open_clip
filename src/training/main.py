@@ -239,6 +239,7 @@ def main(args):
         output_dict=True,
         **model_kwargs,
     )
+
     if args.distill:
         # FIXME: currently assumes the model you're distilling from has the same tokenizer & transforms.
         dist_model, _, _ = create_model_and_transforms(
@@ -248,6 +249,7 @@ def main(args):
             precision=args.precision,
             output_dict=True,
         )
+
     if args.use_bnb_linear is not None:
         print('=> using a layer from bitsandbytes.\n'
               '   this is an experimental feature which requires two extra pip installs\n'
