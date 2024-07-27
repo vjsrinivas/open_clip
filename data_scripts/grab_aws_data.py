@@ -4,12 +4,19 @@ import s3fs
 import json
 from pathlib import Path
 from argparse import ArgumentParser
+from concurrent import futures
+from concurrent.futures import ThreadPoolExecutor
 
 def parse_args():
     parser = ArgumentParser()
     parser.add_argument("--cred_file", type=str, required=True)
     parser.add_argument("--output", type=str, required=True)
     return parser.parse_args()
+
+def download_object(filesystem, file_name, tar_output_path):
+    print(f"Downloading {file_name} to {tar_output_path}")
+    filesystem.download(file_name, tar_output_path)
+    return "Success"
 
 if __name__ == '__main__':
     args = parse_args()
@@ -32,11 +39,27 @@ if __name__ == '__main__':
     print(len(tar_files), len(json_files))
 
     os.makedirs(TAR_OUTPUT_PATH, exist_ok=True)
+    KEYS_TO_DOWNLOAD = []
     for tar_file, json_file in zip(tar_files, json_files):
         tar_file = Path(tar_file)
         json_file = Path(json_file)
 
         dest_tar_file = tar_file.name
         dest_json_file = json_file.name
-        print(dest_tar_file, dest_json_file)
-        fs.download(tar_file, TAR_OUTPUT_PATH)
+        #print(dest_tar_file, dest_json_file)
+        KEYS_TO_DOWNLOAD.append((tar_file, TAR_OUTPUT_PATH)) 
+        #fs.download(tar_file, TAR_OUTPUT_PATH)
+
+    with ThreadPoolExecutor(max_workers=16) as executor:
+        future_to_key = {executor.submit(download_object, fs, key[0], key[1]): key[0] for key in KEYS_TO_DOWNLOAD}
+
+        for future in futures.as_completed(future_to_key):
+            key = future_to_key[future]
+            exception = future.exception()
+
+            if not exception:
+                result = future.result()
+            else:
+                result = exception
+            
+            print(f"{key} result: {result}")
