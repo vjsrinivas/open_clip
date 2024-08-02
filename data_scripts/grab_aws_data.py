@@ -11,6 +11,7 @@ def parse_args():
     parser = ArgumentParser()
     parser.add_argument("--cred_file", type=str, required=True)
     parser.add_argument("--output", type=str, required=True)
+    parser.add_argument("--grab_imagenet", action="store_true", required=False, default=False)
     return parser.parse_args()
 
 def download_object(filesystem, file_name, tar_output_path):
@@ -23,6 +24,7 @@ if __name__ == '__main__':
     CRED_PATH = args.cred_file
     OUTPUT_PATH = args.output
     TAR_OUTPUT_PATH = os.path.join(OUTPUT_PATH, "tars")
+    IMAGENET_OUTPUT_PATH = os.path.join(OUTPUT_PATH, "imagenet_val")
 
     aws_creds = json.load(open(CRED_PATH, "r"))
     print(aws_creds)
@@ -32,11 +34,18 @@ if __name__ == '__main__':
     fs = s3fs.S3FileSystem(anon=False, key=access_key_id, secret=secret_access_key)
     paths = fs.ls(aws_creds["data_root"])
 
-    tar_files = [_path for _path in paths if ".tar" in _path]
+    tar_files = [_path for _path in paths if ".tar" in _path and not ".xz" in _path]
     tar_files.sort()
     json_files = [_path for _path in paths if ".json" in _path]
     json_files.sort()
-    print(len(tar_files), len(json_files))
+
+    imagenet_val_path = [_path for _path in paths if ".xz" in _path]
+    if len(imagenet_val_path) > 0:
+        imagenet_val_path = imagenet_val_path[0]
+    else:
+        imagenet_val_path = None
+
+    print(len(tar_files), len(json_files), imagenet_val_path)
 
     os.makedirs(TAR_OUTPUT_PATH, exist_ok=True)
     KEYS_TO_DOWNLOAD = []
@@ -63,3 +72,7 @@ if __name__ == '__main__':
                 result = exception
             
             print(f"{key} result: {result}")
+
+    if args.grab_imagenet:
+        assert not imagenet_val_path is None, "Could not find a tar.xz file!"
+        fs.download(imagenet_val_path, IMAGENET_OUTPUT_PATH)

@@ -490,12 +490,12 @@ def get_wds_dataset(args, preprocess_img, is_train, epoch=0, floor=False, tokeni
             wds.tarfile_to_samples(handler=log_and_continue),
         ])
 
-    syn_caption_swap = CaptionManager(args.syn_text_file)
+    #syn_caption_swap = CaptionManager(args.syn_text_file)
     pipeline.extend([
         wds.select(filter_no_caption_or_no_image),
         wds.decode("pilrgb", handler=log_and_continue),
         wds.rename(image="jpg;png;jpeg;webp", text="txt", json="json"),
-        wds.map(syn_caption_swap),
+        #wds.map(syn_caption_swap),
         #wds.map_dict(image=preprocess_img, text=lambda text: tokenizer(text)[0]),
         wds.map_dict(image=preprocess_img, text=lambda text: tokenizer(text)[0]),
         wds.to_tuple("image", "text", "json"),
